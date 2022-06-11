@@ -1,0 +1,11 @@
+venv
+weights
+yolov5
+archieves
+images
+test.py
+__pycache__
+.vscode
+recog_datasets
+test.*
+temp
