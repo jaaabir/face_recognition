@@ -1,16 +1,15 @@
-from matplotlib import pyplot
+from calendar import EPOCH
 import tensorflow as tf 
 import tensorflow.keras.backend as k
 import tensorflow.keras as keras 
 from tensorflow.keras.losses import BinaryCrossentropy
 from detect_faces import load_model, close_cam, predict_image, filter_predictions, display_pred_in_cam
-from fr_utils import create_user, DataBase, info, read_img
+from fr_utils import create_user, DataBase, info, read_img, ImgDataset, merge_dfs, generate_match_pairs, generate_mismatch_pairs, alb_transform
 import os
 import numpy as np 
 import cv2 as cv
-from datetime import date, datetime 
+from datetime import datetime 
 from time import time 
-import matplotlib.pyplot as plt 
 
 class Distance(keras.layers.Layer):
     def __init__(self, **kwargs):
@@ -85,7 +84,7 @@ def live_demo(od_model, reg_model, vc = 0, store_locally = True, show_live_image
                 names = os.listdir('images')
                 for ind, name in enumerate(names):
                     path = os.path.join('images', name)
-                    verification_images = [read_img(os.path.join(path, f'{ind}.jpg')) for ind in range(len(os.listdir(path)))]
+                    verification_images = [read_img(os.path.join(path, f'{name}_{ind}.jpg')) for ind in range(len(os.listdir(path)))]
                     authenticate = verify_face(reg_model, anchor_image, verification_images, normalize = True)
                     if authenticate:
                         authorize_person = True
@@ -116,12 +115,77 @@ def live_demo(od_model, reg_model, vc = 0, store_locally = True, show_live_image
             close_cam(cap)
             break
 
+def get_dataset(img_path):
+    pairs  = generate_match_pairs(img_path)
+    mpairs = generate_mismatch_pairs(img_path, pairs.shape[0])
+    df = merge_dfs([pairs, mpairs], 0)
+    df[['imgnum1', 'imgnum2', 'match']] = df[['imgnum1', 'imgnum2', 'match']].astype(str)
+    batch = 4
+    SIZE = 128
+    
+    train_data = ImgDataset(df, img_path, batch, img_size = (SIZE, SIZE), test_size = 0.0, 
+                                seed = 123, transform = alb_transform) 
+    train_data = train_data.load_dataset_V2()
+    train_data = tf.data.Dataset.zip(train_data).prefetch(1)
+    return train_data
+
+@tf.function
+def train_on_batch(batch, model, opt, loss_func, verbose = True):
+    with tf.GradientTape() as tape: 
+        X = batch[:2]
+        y = batch[2]
+        yhat = model(X, training = True)
+        loss = loss_func(y, yhat)
+    
+    del X, y, yhat
+    print(f'Loss : {loss}')
+    grad = tape.gradient(loss, model.trainable_variables)
+    opt.apply_gradients(zip(grad, model.trainable_variables))
+    
+    return loss
+
+def train_model(data, model, opt, loss_func, epochs = 5, save_model = 0, verbose = True):
+    history = {
+        'loss' : [],
+        'accuracy' : []
+    }
+    for epoch in range(1, epochs + 1):
+        print(f'Epoch : {epoch} / {epochs} ', end = ' ')
+        progbar = tf.keras.utils.Progbar(len(data))
+        l = []
+        for idx, batch in enumerate(data):
+            loss = train_on_batch(batch, model, opt, loss_func, verbose = verbose)
+            progbar.update(idx + 1)
+            l.append(loss)
+            
+        if save_model > 0:
+            if epoch % save_model == 0:
+                checkpoint(model)
+                
+        history['loss'].append(np.mean(l))
+        del l
+        
+    return model, opt, history
+
+def checkpoint(model, name = 'siamese_model.h5', remove_prev_model = False):
+    path = os.path.join('weights', name)
+    mname = os.path.basename(path)
+    if mname in os.listdir('weights'):
+        if remove_prev_model:
+            os.unlink(path)
+        else:
+            name, ftype = mname.split('.')
+            num = len(os.listdir('weights')) - 1
+            mname = f'{name}{num}.{ftype}'
+            path = path = os.path.join('weights', mname)
+    model.save(path)
+
 def main():
-    # reg_model = load_recog_model('siamese_model.h5')
     info(
     '''
     (1) - create a new user 
-    (2) - start live demo             
+    (2) - start live demo  
+    (3) - update the model            
     ''')
     option = int(input('>>> '))
     store_locally = True
@@ -132,6 +196,15 @@ def main():
         od_model = load_model('best_ep2.pt', 'cpu')
         reg_model = load_recog_model('siamese_model.h5')
         live_demo(od_model, reg_model, vc = 0, store_locally = store_locally, show_live_images = True, verbose = True)
+    elif option == 3:
+        EPOCHS = 2
+        reg_model = load_recog_model('siamese_model.h5')
+        train_data = get_dataset('images')
+        train_model(train_data, reg_model, keras.optimizers.Adam(learning_rate = 0.001), BinaryCrossentropy(), EPOCHS, 2)
+        info('siamese model has finished training')
+    else:
+        exit()
+        
 
 if __name__ == "__main__":
     main()

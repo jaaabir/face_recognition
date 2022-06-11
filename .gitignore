@@ -1,11 +1,20 @@
-venv
+### model weights 
 weights
 yolov5
+
+### datasets and images 
 archieves
 images
+temp
+recog_datasets
+
+### environments 
+Pipfile
+Pipfile.lock
+venv
+
+### others
 test.py
 __pycache__
 .vscode
-recog_datasets
 test.*
-temp
